@@ -1,2 +1,2 @@
 # 404
-404 error code
+404 error code for vuejs
