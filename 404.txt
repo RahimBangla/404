@@ -1,1 +1,1 @@
-404 Error
+404 Error for vue js redirect
