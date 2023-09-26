@@ -1,0 +1,123 @@
+name: Deployment - Deploy
+
+on:
+    workflow_dispatch:
+        inputs:
+            env:
+                description: Environment
+                required: true
+                type: choice
+                options:
+                    - 'staging'
+                    - 'production'
+
+                default: staging
+
+            apps:
+                description: Projects to deploy
+                type: choice
+                default: affected
+                options:
+                    - 'all'
+                    - 'affected'
+
+                    - 'liverecover-api'
+                    - 'liverecover-web-user'
+                    - 'liverecover-web-admin'
+                    - 'liverecover-db'
+                    - 'liverecover-messaging'
+                    - 'liverecover-lambda'
+
+    repository_dispatch:
+        types:
+            - deploy
+
+    workflow_call:
+        inputs:
+            env:
+                description: Environment to promote to
+                required: true
+                type: string
+                default: staging
+
+jobs:
+    deploy:
+        runs-on: ubuntu-latest
+        env:
+            ENV: ${{ github.event.client_payload.env || github.event.inputs.env || 'staging' }}
+            APPS: ${{ github.event.client_payload.apps || github.event.inputs.apps || 'affected' }}
+        steps:
+            - name: Check out source repository
+              uses: actions/checkout@v3
+              with:
+                  fetch-depth: 2
+
+            - name: Cache dependencies
+              id: cache
+              uses: actions/cache@v3
+              with:
+                  path: ./node_modules
+                  key: node-modules-${{ hashFiles('bun.lockb') }}
+
+            - run: |
+                  rm -rf bunfig.toml
+                  touch bunfig.toml
+                  echo "[install.scopes]" >> bunfig.toml
+                  echo "@voyagemobile = { token = '${{ secrets.GITHUB_TOKEN }}', url = 'https://npm.pkg.github.com/' }" >> bunfig.toml
+                  echo "@fortawesome = { token = '${{ secrets.FONTAWESOME_AUTH_TOKEN }}', url = 'https://npm.fontawesome.com' }" >> bunfig.toml
+              name: Create bunfig.toml
+              if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+
+            - uses: oven-sh/setup-bun@v1
+              if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+
+            - run: bun i
+              name: Install dependencies
+              if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+
+            - run: bun x patch-package
+              name: Patch packages
+              if: ${{ steps.cache.outputs.cache-hit != 'true' }}
+
+            - name: Start ${{ env.ENV }} deployment
+              uses: bobheadxi/deployments@v0.6.0
+              id: start
+              with:
+                  step: start
+                  token: ${{ secrets.GITHUB_TOKEN }}
+                  env: ${{ env.ENV }}
+
+            - name: Configure staging AWS credentials
+              if: ${{ env.ENV == 'staging' }}
+              uses: aws-actions/configure-aws-credentials@v1
+              with:
+                  aws-access-key-id: ${{ secrets.LR_STAGING_AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.LR_STAGING_AWS_SECRET_ACCESS_KEY }}
+                  aws-region: ${{ secrets.LR_STAGING_AWS_REGION }}
+
+            - name: Configure production AWS credentials
+              if: ${{ env.ENV == 'production' }}
+              uses: aws-actions/configure-aws-credentials@v1
+              with:
+                  aws-access-key-id: ${{ secrets.LR_PROD_AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.LR_PROD_AWS_SECRET_ACCESS_KEY }}
+                  aws-region: ${{ secrets.LR_PROD_AWS_REGION }}
+
+            - uses: dkershner6/aws-ssm-getparameters-action@v1
+              with:
+                  parameterPairs: '/liverecover/database/uri = DATABASE_URL'
+
+            - name: Deploy ${{ env.ENV }} affected apps
+              id: deploy-affected
+              if: ${{ env.APPS == 'affected' }}
+              run: npx nx affected --target=deploy --base=origin/main~1 --head=origin/main --configuration $ENV
+
+            - name: Deploy ${{ env.ENV }} all apps
+              id: deploy
+              if: ${{ env.APPS == 'all' }}
+              run: npx nx run-many --target=deploy --all=true --parallel=6 --configuration $ENV
+
+            - name: Deploy ${{ env.ENV }} specific apps
+              id: deploy-specific
+              if: ${{ env.APPS != 'all' && env.APPS != 'affected' }}
+              run: npx nx run-many --target=deploy --projects ${{ env.APPS }} --configuration $ENV
